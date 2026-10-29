@@ -21,6 +21,10 @@ const FADE = 180;
 const COLLAPSE_DELAY = 200; // ms of grace so brushing the edge doesn't flicker
 const NOTIFICATION_TIMEOUT = 4000;
 const OSD_TIMEOUT = 1500;
+const BATTERY_TIMEOUT = 3000;
+const LOW_BATTERY = [20, 10]; // warn once when dropping past each of these percentages
+const UPOWER_BATTERY = 2;
+const PLUGGED_STATES = [1, 4, 5]; // charging, fully charged, pending charge
 
 function label(styleClass) {
     const l = new St.Label({style_class: styleClass, y_align: Clutter.ActorAlign.CENTER});
@@ -81,6 +85,9 @@ class Island extends St.Widget {
         this._play = button('media-playback-start-symbolic', () => this._player?.playPause());
         this._next = button('media-skip-forward-symbolic', () => this._player?.next());
         [this._prev, this._play, this._next].forEach(b => controls.add_child(b));
+        // Swallow clicks on disabled buttons so they don't fall through and raise the player
+        controls.reactive = true;
+        controls.connect('button-release-event', () => Clutter.EVENT_STOP);
         [this._title, this._artist, controls].forEach(a => info.add_child(a));
         this._full.add_child(this._art);
         this._full.add_child(info);
@@ -185,6 +192,7 @@ class Island extends St.Widget {
         this._play.child.icon_name = player.status === 'Playing'
             ? 'media-playback-pause-symbolic'
             : 'media-playback-start-symbolic';
+        // Dimmed via :insensitive when the player can't skip (e.g. a single YouTube video)
         this._prev.reactive = player.canGoPrevious;
         this._next.reactive = player.canGoNext;
         this._update();
@@ -201,12 +209,15 @@ class Island extends St.Widget {
         });
     }
 
-    showOsd(icon, level, maxLevel) {
+    showOsd(icon, level, maxLevel, {text = null, tone = null, timeout = OSD_TIMEOUT} = {}) {
         const fraction = Math.clamp(level / maxLevel, 0, 1);
         this._osdIcon.gicon = icon;
-        this._osdLabel.text = `${Math.round(level * 100)}%`;
+        this._osdLabel.text = text ?? `${Math.round(level * 100)}%`;
+        ['charging', 'low'].forEach(t => this._osdFill.remove_style_class_name(t));
+        if (tone)
+            this._osdFill.add_style_class_name(tone);
         this._osdFill.ease({scale_x: fraction, duration: 150, mode: Clutter.AnimationMode.EASE_OUT_QUAD});
-        this._showActivity(this._osd, OSD_SIZE, OSD_TIMEOUT, null);
+        this._showActivity(this._osd, OSD_SIZE, timeout, null);
     }
 
     _showActivity(activityView, size, timeout, onClick) {
@@ -293,9 +304,14 @@ export default class DynamicIslandExtension extends Extension {
         this._enableMedia();
         this._enableNotifications();
         this._enableOsd();
+        this._enableBattery();
     }
 
     disable() {
+        this._batteryCancellable.cancel();
+        this._battery?.disconnectObject(this);
+        this._battery = null;
+
         Main.osdWindowManager.show = this._origOsdShow;
 
         Main.messageTray.disconnectObject(this);
@@ -325,6 +341,44 @@ export default class DynamicIslandExtension extends Extension {
                 return this._origOsdShow.call(Main.osdWindowManager, monitorIndex, icon, label, level, maxLevel);
             this._island.showOsd(icon, level, maxLevel ?? 1);
         };
+    }
+
+    _enableBattery() {
+        this._batteryCancellable = new Gio.Cancellable();
+        Gio.DBusProxy.new_for_bus(Gio.BusType.SYSTEM, Gio.DBusProxyFlags.NONE, null,
+            'org.freedesktop.UPower', '/org/freedesktop/UPower/devices/DisplayDevice',
+            'org.freedesktop.UPower.Device', this._batteryCancellable, (o, res) => {
+                try {
+                    this._battery = Gio.DBusProxy.new_for_bus_finish(res);
+                } catch (e) {
+                    if (!e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
+                        logError(e, 'dynamic-island: UPower unavailable');
+                    return;
+                }
+                this._battery.connectObject('g-properties-changed', () => this._onBattery(), this);
+                this._onBattery();
+            });
+    }
+
+    // Pops the island on plug/unplug and when the battery drops past a LOW_BATTERY threshold
+    _onBattery() {
+        const get = name => this._battery.get_cached_property(name)?.unpack();
+        if (!get('IsPresent') || get('Type') !== UPOWER_BATTERY)
+            return;
+        const pct = get('Percentage');
+        const plugged = PLUGGED_STATES.includes(get('State'));
+        const first = this._plugged === undefined;
+        const pluggedChanged = plugged !== this._plugged;
+        const crossedLow = !plugged && LOW_BATTERY.some(t => this._lastPct > t && pct <= t);
+        this._plugged = plugged;
+        this._lastPct = pct;
+        if (first || !(pluggedChanged || crossedLow))
+            return;
+
+        const tone = plugged ? 'charging' : pct <= LOW_BATTERY[0] ? 'low' : null;
+        const text = plugged ? `Mengisi · ${Math.round(pct)}%` : `${Math.round(pct)}%`;
+        this._island.showOsd(new Gio.ThemedIcon({name: get('IconName')}), pct, 100,
+            {text, tone, timeout: BATTERY_TIMEOUT});
     }
 
     _enableNotifications() {

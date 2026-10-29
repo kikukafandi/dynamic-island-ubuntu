@@ -6,6 +6,7 @@ An iPhone-style dynamic island in the GNOME top bar.
 - **Now playing** media (MPRIS): cover + title; hover to expand with ⏮ ⏯ ⏭
 - **Notifications** pop into the island (replaces stock banners)
 - **Volume / brightness** level shown in the island (replaces stock OSD)
+- **Battery**: pops up when the charger is plugged/unplugged and when it drops to 20% / 10%
 
 Supports GNOME Shell 46 (Ubuntu 24.04).
 

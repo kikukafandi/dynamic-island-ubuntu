@@ -20,9 +20,12 @@
 .dynamic-island .island-osd { spacing: 12px; }
 .dynamic-island .island-level { height: 6px; border-radius: 3px; background-color: rgba(255,255,255,0.2); }
 .dynamic-island .island-level-fill { border-radius: 3px; background-color: #fff; }
+.dynamic-island .island-level-fill.charging { background-color: #34c759; }
+.dynamic-island .island-level-fill.low { background-color: #ff3b30; }
 .dynamic-island .island-osd-label { font-weight: bold; font-size: 9.5pt; min-width: 36px; text-align: right; }
 .dynamic-island .island-button { color: #fff; border-radius: 99px; padding: 4px; }
 .dynamic-island .island-button:hover { background-color: rgba(255,255,255,0.15); }
+.dynamic-island .island-button:insensitive { color: rgba(255,255,255,0.3); }
 
 /* Transparent top bar so the island floats on its own */
 #panel, #panel.solid, #panel:overview {
