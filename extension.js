@@ -15,7 +15,7 @@ const MPRIS_PREFIX = 'org.mpris.MediaPlayer2.';
 const EXPANDED_SIZE = [400, 110]; // ponytail: fixed sizes, make them settings if anyone asks
 const NOTIFICATION_SIZE = [400, 76];
 const OSD_SIZE = [300, 36];
-const MAX_COMPACT_WIDTH = 280;
+const MAX_COMPACT_WIDTH = 360;
 const DURATION = 450;
 const FADE = 180;
 const COLLAPSE_DELAY = 200; // ms of grace so brushing the edge doesn't flicker
@@ -70,8 +70,12 @@ class Island extends St.Widget {
         });
         this._compactIcon = new St.Icon({icon_size: 16, visible: false});
         this._compactLabel = label('');
+        // Clock stays visible next to the track title while media plays (panel clock is hidden under the island)
+        this._compactClock = new St.Label({style_class: 'island-compact-clock', y_align: Clutter.ActorAlign.CENTER, visible: false});
+        this._compactClock.clutter_text.ellipsize = Pango.EllipsizeMode.NONE; // the title shrinks, never the clock
         this._compact.add_child(this._compactIcon);
         this._compact.add_child(this._compactLabel);
+        this._compact.add_child(this._compactClock);
         this._current = this._compact;
 
         // Expanded on hover: cover art, title/artist, controls
@@ -130,10 +134,10 @@ class Island extends St.Widget {
         // Mirror the panel clock instead of running our own
         this._clock = Main.panel.statusArea.dateMenu._clockDisplay;
         this._clock.connectObject('notify::text', () => {
-            if (!this._player) {
+            this._compactClock.text = this._clock.text;
+            if (!this._player)
                 this._compactLabel.text = this._artist.text = this._clock.text;
-                this._update();
-            }
+            this._update();
         }, this);
 
         this.connect('notify::hover', () => {
@@ -170,6 +174,7 @@ class Island extends St.Widget {
         this._player = player;
         if (!player) {
             this._compactIcon.hide();
+            this._compactClock.hide();
             this._compactLabel.text = this._clock.text;
             this._art.gicon = new Gio.ThemedIcon({name: 'audio-x-generic-symbolic'});
             this._title.text = 'Tidak ada media';
@@ -184,6 +189,8 @@ class Island extends St.Widget {
             : player.app?.get_icon() ?? new Gio.ThemedIcon({name: 'audio-x-generic-symbolic'});
         this._compactIcon.gicon = gicon;
         this._compactIcon.show();
+        this._compactClock.text = this._clock.text;
+        this._compactClock.show();
         this._controls.show();
         this._compactLabel.text = player.trackTitle;
         this._art.gicon = gicon;

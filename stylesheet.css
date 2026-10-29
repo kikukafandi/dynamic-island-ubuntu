@@ -12,6 +12,7 @@
   padding: 14px;
 }
 .dynamic-island .island-compact { spacing: 8px; font-weight: bold; }
+.dynamic-island .island-compact-clock { color: #aaa; padding-left: 4px; }
 .dynamic-island .island-expanded { spacing: 14px; }
 .dynamic-island .island-art { border-radius: 12px; }
 .dynamic-island .island-title { font-weight: bold; font-size: 11pt; }
