@@ -1,0 +1,9 @@
+{
+  "uuid": "dynamic-island@kikuk",
+  "name": "Dynamic Island",
+  "description": "iPhone-style dynamic island in the top bar: clock when idle, now-playing media that expands on hover.",
+  "shell-version": [
+    "46"
+  ],
+  "url": "https://github.com/kikukafandi/dynamic-island-ubuntu"
+}
