@@ -29,7 +29,7 @@
 .dynamic-island .island-level-fill.low { background-color: #ff3b30; }
 .dynamic-island .island-osd-label { font-weight: bold; font-size: 9.5pt; min-width: 36px; text-align: right; }
 .dynamic-island .island-wave { spacing: 2px; padding-left: 2px; }
-.dynamic-island .island-wave-bar { width: 3px; height: 14px; border-radius: 2px; background-color: #34c759; }
+.dynamic-island .island-wave-bar { width: 2px; height: 12px; border-radius: 1px; background-color: #34c759; }
 .dynamic-island .island-dot { width: 7px; height: 7px; border-radius: 4px; }
 .dynamic-island .island-dot.green { background-color: #34c759; }
 .dynamic-island .island-dot.orange { background-color: #ff9500; }

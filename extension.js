@@ -18,7 +18,7 @@ const EXPANDED_SIZE = [400, 110]; // ponytail: fixed sizes, make them settings i
 const NOTIFICATION_SIZE = [400, 76];
 const OSD_SIZE = [300, 36];
 const MAX_COMPACT_WIDTH = 280;
-const NOTCH_WIDTH = 180; // idle island is an empty MacBook-style notch; the clock lives on the right
+const NOTCH_WIDTH = 180; // compact island (idle notch or cover + waveform); the clock lives on the right
 const DURATION = 450;
 const FADE = 180;
 const COLLAPSE_DELAY = 200; // ms of grace so brushing the edge doesn't flicker
@@ -26,7 +26,6 @@ const NOTIFICATION_TIMEOUT = 4000;
 const OSD_TIMEOUT = 1500;
 const BATTERY_TIMEOUT = 3000;
 const PILL_TIMEOUT = 2000;
-const WAVE_STEP = 180; // ms between waveform bar moves
 const CAMERA_POLL = 3; // seconds
 const LOW_BATTERY = [20, 10]; // warn once when dropping past each of these percentages
 const UPOWER_BATTERY = 2;
@@ -66,22 +65,20 @@ class Island extends St.Widget {
         this._activity = null; // {view, size, onClick} shown temporarily over everything else
 
         // Compact: clock, or app/cover icon + track title
+        // Compact, iPhone-style: cover on the left, waveform/privacy dots on the right, title only when expanded
         this._compact = view({
             style_class: 'island-compact',
-            x_expand: false,
             y_expand: false,
-            x_align: Clutter.ActorAlign.CENTER,
             y_align: Clutter.ActorAlign.CENTER,
             visible: true,
         });
         this._compactIcon = new St.Icon({icon_size: 16, visible: false});
-        this._compactLabel = label('');
         this._compact.add_child(this._compactIcon);
-        this._compact.add_child(this._compactLabel);
+        this._compact.add_child(new St.Widget({x_expand: true})); // pushes the rest to the right edge
 
         // Music waveform, animated while a player is Playing
         this._wave = new St.BoxLayout({style_class: 'island-wave', visible: false, y_align: Clutter.ActorAlign.CENTER});
-        for (let i = 0; i < 4; i++) {
+        for (let i = 0; i < 5; i++) {
             this._wave.add_child(new St.Widget({
                 style_class: 'island-wave-bar',
                 pivot_point: new Graphene.Point({x: 0.5, y: 0.5}),
@@ -182,7 +179,7 @@ class Island extends St.Widget {
         this.connect('destroy', () => {
             this._clearSource('_collapseId');
             this._clearSource('_activityId');
-            this._clearSource('_waveId');
+            this._waving = false;
         });
         this.connect('notify::width', () => this._reposition());
         this.connect('button-release-event', () => {
@@ -200,7 +197,6 @@ class Island extends St.Widget {
         this._player = player;
         if (!player) {
             this._compactIcon.hide();
-            this._compactLabel.text = '';
             this._setWave(false);
             this._art.gicon = new Gio.ThemedIcon({name: 'audio-x-generic-symbolic'});
             this._title.text = 'Tidak ada media';
@@ -216,7 +212,6 @@ class Island extends St.Widget {
         this._compactIcon.gicon = gicon;
         this._compactIcon.show();
         this._controls.show();
-        this._compactLabel.text = player.trackTitle;
         this._art.gicon = gicon;
         this._title.text = player.trackTitle;
         this._artist.text = player.trackArtists.join(', ');
@@ -266,20 +261,28 @@ class Island extends St.Widget {
 
     _setWave(playing) {
         this._wave.visible = playing;
-        if (playing === !!this._waveId)
+        if (playing === !!this._waving)
             return;
-        this._clearSource('_waveId');
-        if (!playing)
-            return;
-        this._waveId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, WAVE_STEP, () => {
-            for (const bar of this._wave.get_children()) {
-                bar.ease({
-                    scale_y: 0.3 + Math.random() * 0.7,
-                    duration: WAVE_STEP,
-                    mode: Clutter.AnimationMode.EASE_IN_OUT_SINE,
-                });
-            }
-            return GLib.SOURCE_CONTINUE;
+        this._waving = playing;
+        for (const bar of this._wave.get_children()) {
+            bar.remove_all_transitions();
+            if (playing)
+                this._animateBar(bar);
+            else
+                bar.scale_y = 0.3;
+        }
+    }
+
+    // Each bar chains its own ease with a random height and duration, so they drift independently
+    _animateBar(bar) {
+        bar.ease({
+            scale_y: 0.25 + Math.random() * 0.75,
+            duration: 300 + Math.random() * 300,
+            mode: Clutter.AnimationMode.EASE_IN_OUT_SINE,
+            onComplete: () => {
+                if (this._waving)
+                    this._animateBar(bar);
+            },
         });
     }
 
@@ -307,8 +310,7 @@ class Island extends St.Widget {
     }
 
     _compactSize() {
-        const width = this._player ? this._fitWidth(this._compact) : NOTCH_WIDTH;
-        return [width, Main.panel.height - 6];
+        return [NOTCH_WIDTH, Main.panel.height - 6];
     }
 
     // Island width that fits a view's natural width plus the island's own padding and border
