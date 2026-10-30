@@ -53,3 +53,9 @@
 }
 
 #panel .island-app-name { font-weight: bold; }
+
+/* Even, Mac-tight spacing between top bar items, whatever padding each extension/theme brings */
+#panel .panel-button {
+  -natural-hpadding: 9px;
+  -minimum-hpadding: 6px;
+}
