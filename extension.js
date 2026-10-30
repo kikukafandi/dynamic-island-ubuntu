@@ -1,8 +1,10 @@
 import Clutter from 'gi://Clutter';
+import GdkPixbuf from 'gi://GdkPixbuf';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
 import Graphene from 'gi://Graphene';
+import Meta from 'gi://Meta';
 import Pango from 'gi://Pango';
 import Shell from 'gi://Shell';
 import St from 'gi://St';
@@ -12,6 +14,8 @@ import * as MessageTray from 'resource:///org/gnome/shell/ui/messageTray.js';
 import {MprisPlayer} from 'resource:///org/gnome/shell/ui/mpris.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
+
+import {accentFromPixels} from './accent.js';
 
 const MPRIS_PREFIX = 'org.mpris.MediaPlayer2.';
 const EXPANDED_SIZE = [400, 110]; // ponytail: fixed sizes, make them settings if anyone asks
@@ -26,7 +30,18 @@ const NOTIFICATION_TIMEOUT = 4000;
 const OSD_TIMEOUT = 1500;
 const BATTERY_TIMEOUT = 3000;
 const PILL_TIMEOUT = 2000;
-const CAMERA_POLL = 3; // seconds
+const PAUSE_HIDE_TIMEOUT = 30; // seconds paused before the island fades back to idle (hover still opens it)
+const CAMERA_POLL = 5; // seconds
+// iOS system colours used to tint each kind of activity
+const COLORS = {
+    blue: [10, 132, 255],
+    green: [52, 199, 89],
+    orange: [255, 149, 0],
+    red: [255, 59, 48],
+    purple: [175, 82, 222],
+};
+const TONE_COLORS = {charging: COLORS.green, low: COLORS.red, ...COLORS};
+const WAVE_FPS = 8; // waveform steps per second; continuous easing would repaint the shell at 60fps the whole time music plays
 const LOW_BATTERY = [20, 10]; // warn once when dropping past each of these percentages
 const UPOWER_BATTERY = 2;
 const PLUGGED_STATES = [1, 4, 5]; // charging, fully charged, pending charge
@@ -46,6 +61,15 @@ function button(iconName, callback) {
     return b;
 }
 
+function islandStyle([r, g, b], gradient) {
+    let style = `border-color: rgba(${r},${g},${b},0.5); box-shadow: 0 0 16px 1px rgba(${r},${g},${b},0.45);`;
+    if (gradient) {
+        const dark = [r, g, b].map(c => Math.round(c * 0.3)).join(',');
+        style += ` background-gradient-direction: vertical; background-gradient-start: rgb(${dark}); background-gradient-end: #000;`;
+    }
+    return style;
+}
+
 function view(params = {}) {
     return new St.BoxLayout({x_expand: true, y_expand: true, visible: false, ...params});
 }
@@ -63,6 +87,8 @@ class Island extends St.Widget {
         this._player = null;
         this._hovered = false;
         this._activity = null; // {view, size, onClick} shown temporarily over everything else
+        this._fullscreen = false;
+        this._pausedLong = false;
 
         // Compact: clock, or app/cover icon + track title
         // Compact, iPhone-style: cover on the left, waveform/privacy dots on the right, title only when expanded
@@ -179,7 +205,11 @@ class Island extends St.Widget {
         this.connect('destroy', () => {
             this._clearSource('_collapseId');
             this._clearSource('_activityId');
+            this._clearSource('_pauseId');
+            this._clearSource('_waveId');
+            this._destroyed = true;
             this._waving = false;
+            this._setUnredirectBlocked(false);
         });
         this.connect('notify::width', () => this._reposition());
         this.connect('button-release-event', () => {
@@ -195,27 +225,38 @@ class Island extends St.Widget {
 
     setPlayer(player) {
         this._player = player;
+        this._trackPause(player?.status === 'Paused');
         if (!player) {
             this._compactIcon.hide();
-            this._setWave(false);
+            this._setWave(false, false);
             this._art.gicon = new Gio.ThemedIcon({name: 'audio-x-generic-symbolic'});
-            this._title.text = 'Tidak ada media';
+            this._coverKey = null;
+            this._accent = null;
+            this._title.text = 'Nothing playing';
             this._artist.text = this._clock.text;
             this._controls.hide();
             this._update();
             return;
         }
 
-        const gicon = player.trackCoverUrl
-            ? new Gio.FileIcon({file: Gio.File.new_for_uri(player.trackCoverUrl)})
-            : player.app?.get_icon() ?? new Gio.ThemedIcon({name: 'audio-x-generic-symbolic'});
-        this._compactIcon.gicon = gicon;
-        this._compactIcon.show();
+        // MPRIS fires 'changed' for every property; only reload the cover when it actually changes
+        const coverKey = player.trackCoverUrl || player.app?.get_id() || '';
+        if (coverKey !== this._coverKey) {
+            this._coverKey = coverKey;
+            const gicon = player.trackCoverUrl
+                ? new Gio.FileIcon({file: Gio.File.new_for_uri(player.trackCoverUrl)})
+                : player.app?.get_icon() ?? new Gio.ThemedIcon({name: 'audio-x-generic-symbolic'});
+            this._compactIcon.gicon = gicon;
+            this._art.gicon = gicon;
+            this._accent = null;
+            if (player.trackCoverUrl)
+                this._loadAccent(player.trackCoverUrl);
+        }
+        this._compactIcon.visible = !this._pausedLong;
         this._controls.show();
-        this._art.gicon = gicon;
         this._title.text = player.trackTitle;
         this._artist.text = player.trackArtists.join(', ');
-        this._setWave(player.status === 'Playing');
+        this._setWave(player.status === 'Playing', !this._pausedLong);
         this._play.child.icon_name = player.status === 'Playing'
             ? 'media-playback-pause-symbolic'
             : 'media-playback-start-symbolic';
@@ -233,25 +274,85 @@ class Island extends St.Widget {
         this._showActivity(this._notif, NOTIFICATION_SIZE, NOTIFICATION_TIMEOUT, () => {
             notification.activate();
             this._endActivity();
-        });
+        }, COLORS.blue);
     }
 
     showOsd(icon, level, maxLevel, {text = null, tone = null, timeout = OSD_TIMEOUT} = {}) {
         const fraction = Math.clamp(level / maxLevel, 0, 1);
         this._osdIcon.gicon = icon;
         this._osdLabel.text = text ?? `${Math.round(level * 100)}%`;
-        ['charging', 'low'].forEach(t => this._osdFill.remove_style_class_name(t));
-        if (tone)
-            this._osdFill.add_style_class_name(tone);
+        for (const actor of [this._osdFill, this._osdIcon]) {
+            ['charging', 'low'].forEach(t => actor.remove_style_class_name(t));
+            if (tone)
+                actor.add_style_class_name(tone);
+        }
         this._osdFill.ease({scale_x: fraction, duration: 150, mode: Clutter.AnimationMode.EASE_OUT_QUAD});
-        this._showActivity(this._osd, OSD_SIZE, timeout, null);
+        this._showActivity(this._osd, OSD_SIZE, timeout, null, TONE_COLORS[tone] ?? COLORS.blue);
     }
 
     showPill(iconName, text, tone = null) {
         this._pillIcon.icon_name = iconName;
         this._pillIcon.style_class = tone ? `island-pill-icon ${tone}` : 'island-pill-icon';
         this._pillLabel.text = text;
-        this._showActivity(this._pill, [this._fitWidth(this._pill), Main.panel.height - 6], PILL_TIMEOUT, null);
+        this._showActivity(this._pill, [this._fitWidth(this._pill), Main.panel.height - 6], PILL_TIMEOUT, null,
+            TONE_COLORS[tone] ?? COLORS.blue);
+    }
+
+    // Paused for PAUSE_HIDE_TIMEOUT: hide cover/waveform and let the island go idle, like iPhone
+    _trackPause(paused) {
+        if (!paused) {
+            this._clearSource('_pauseId');
+            this._pausedLong = false;
+            return;
+        }
+        if (this._pauseId || this._pausedLong)
+            return;
+        this._pauseId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, PAUSE_HIDE_TIMEOUT, () => {
+            this._pauseId = null;
+            this._pausedLong = true;
+            this.setPlayer(this._player);
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    // Reads the cover at 24x24 off the main loop and derives the accent colour (falls back to green)
+    _loadAccent(uri) {
+        Gio.File.new_for_uri(uri).read_async(GLib.PRIORITY_LOW, null, (file, res) => {
+            let stream;
+            try {
+                stream = file.read_finish(res);
+            } catch {
+                return; // e.g. https art without gvfs: keep the default accent
+            }
+            GdkPixbuf.Pixbuf.new_from_stream_at_scale_async(stream, 24, 24, false, null, (src, res2) => {
+                let pixbuf;
+                try {
+                    pixbuf = GdkPixbuf.Pixbuf.new_from_stream_finish(res2);
+                } catch {
+                    return;
+                } finally {
+                    stream.close(null);
+                }
+                if (this._destroyed || this._coverKey !== uri)
+                    return;
+                this._accent = accentFromPixels(pixbuf.get_pixels(), pixbuf.get_n_channels());
+                this._paintWave();
+                this._update();
+            });
+        });
+    }
+
+    _paintWave() {
+        const [r, g, b] = this._accent ?? COLORS.green;
+        // Paused bars keep the dim grey from the stylesheet
+        const style = this._wavePlaying ? `background-color: rgb(${r},${g},${b});` : null;
+        this._wave.get_children().forEach(bar => (bar.style = style));
+    }
+
+    // In fullscreen (presentations, videos) the island stays out of the way and only shows up for activities
+    setFullscreen(fullscreen) {
+        this._fullscreen = fullscreen;
+        this._update();
     }
 
     setPrivacy(key, active) {
@@ -259,36 +360,42 @@ class Island extends St.Widget {
         this._update();
     }
 
-    _setWave(playing) {
-        this._wave.visible = playing;
-        if (playing === !!this._waving)
-            return;
-        this._waving = playing;
-        for (const bar of this._wave.get_children()) {
-            bar.remove_all_transitions();
-            if (playing)
-                this._animateBar(bar);
-            else
-                bar.scale_y = 0.3;
-        }
+    // Paused: bars settle flat and dim instead of disappearing, so the island doesn't look empty
+    _setWave(playing, visible = true) {
+        this._wavePlaying = playing;
+        this._wave.visible = visible;
+        if (playing)
+            this._wave.remove_style_class_name('paused');
+        else
+            this._wave.add_style_class_name('paused');
+        this._paintWave();
+        this._syncWave();
     }
 
-    // Each bar chains its own ease with a random height and duration, so they drift independently
-    _animateBar(bar) {
-        bar.ease({
-            scale_y: 0.25 + Math.random() * 0.75,
-            duration: 300 + Math.random() * 300,
-            mode: Clutter.AnimationMode.EASE_IN_OUT_SINE,
-            onComplete: () => {
-                if (this._waving)
-                    this._animateBar(bar);
-            },
+    // Bars only animate while visible on screen: not when expanded, showing an activity, or hidden in fullscreen
+    _syncWave() {
+        const run = !!this._wavePlaying && this._wave.visible &&
+            this._current === this._compact && !this._hidden;
+        if (run === !!this._waving)
+            return;
+        this._waving = run;
+        this._clearSource('_waveId');
+        const bars = this._wave.get_children();
+        if (!run) {
+            bars.forEach(bar => (bar.scale_y = 0.3));
+            return;
+        }
+        // Equalizer-style steps: each bar drifts a little from its previous height, so it reads as motion, not noise
+        this._waveId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, Math.round(1000 / WAVE_FPS), () => {
+            for (const bar of bars)
+                bar.scale_y = Math.clamp(bar.scale_y + (Math.random() - 0.5) * 0.6, 0.25, 1);
+            return GLib.SOURCE_CONTINUE;
         });
     }
 
-    _showActivity(activityView, size, timeout, onClick) {
+    _showActivity(activityView, size, timeout, onClick, color) {
         this._clearSource('_activityId');
-        this._activity = {view: activityView, size, onClick};
+        this._activity = {view: activityView, size, onClick, color};
         this._activityId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, timeout, () => {
             this._activityId = null;
             this._endActivity();
@@ -331,21 +438,57 @@ class Island extends St.Widget {
             target = [this._full, EXPANDED_SIZE];
         const [next, size] = target;
 
+        // Hide for real (not just transparent) so it drops out of the input region over fullscreen apps
+        const hidden = this._fullscreen && !this._activity;
+        // X11 may unredirect a fullscreen window, which would draw it over all shell chrome
+        this._setUnredirectBlocked(this._fullscreen && !hidden);
+        if (hidden !== !!this._hidden) {
+            this._hidden = hidden;
+            if (hidden) {
+                this.ease({opacity: 0, duration: FADE, mode: Clutter.AnimationMode.EASE_OUT_QUAD, onComplete: () => this.hide()});
+            } else {
+                this.show();
+                this.ease({opacity: 255, duration: FADE, mode: Clutter.AnimationMode.EASE_OUT_QUAD});
+            }
+        }
+
         if (next !== this._current) {
             this._crossfade(this._current, next);
             this._current = next;
         }
+        this._syncWave();
         // Idle (nothing playing, no privacy dot): blend into the top bar, only show up for activity
-        const idle = next === this._compact && !this._player && !Object.values(this._dots).some(d => d.visible);
+        const idle = next === this._compact && (!this._player || this._pausedLong) &&
+            !Object.values(this._dots).some(d => d.visible);
         if (idle)
             this.add_style_class_name('idle');
         else
             this.remove_style_class_name('idle');
+
+        // Colour: activities glow in their own colour, media in the album-art accent (gradient when expanded)
+        let color = null;
+        if (this._activity)
+            color = this._activity.color;
+        else if (this._player && !idle)
+            color = this._accent ?? COLORS.green;
+        const style = color ? islandStyle(color, next === this._full && !!this._player) : null;
+        if (style !== this.style)
+            this.style = style;
         if ([this._compact, this._osd, this._pill].includes(next)) // slim pills keep compact padding
             this.remove_style_class_name('expanded');
         else
             this.add_style_class_name('expanded');
         this._easeTo(size);
+    }
+
+    _setUnredirectBlocked(blocked) {
+        if (blocked === !!this._unredirectBlocked)
+            return;
+        this._unredirectBlocked = blocked;
+        if (blocked)
+            Meta.disable_unredirect_for_display(global.display);
+        else
+            Meta.enable_unredirect_for_display(global.display);
     }
 
     _crossfade(from, to) {
@@ -358,6 +501,10 @@ class Island extends St.Widget {
     }
 
     _easeTo([width, height]) {
+        if (width === this._targetWidth && height === this._targetHeight)
+            return;
+        this._targetWidth = width;
+        this._targetHeight = height;
         this.ease({width, height, duration: DURATION, mode: Clutter.AnimationMode.EASE_OUT_QUINT});
     }
 
@@ -371,8 +518,12 @@ class Island extends St.Widget {
 export default class DynamicIslandExtension extends Extension {
     enable() {
         this._island = new Island();
-        Main.layoutManager.addTopChrome(this._island, {trackFullscreen: true});
+        Main.layoutManager.addTopChrome(this._island);
         this._island.setPlayer(null);
+        const syncFullscreen = () => this._island.setFullscreen(
+            global.display.get_monitor_in_fullscreen(Main.layoutManager.primaryIndex));
+        global.display.connectObject('in-fullscreen-changed', syncFullscreen, this);
+        syncFullscreen();
         Main.layoutManager.connectObject('monitors-changed', () => this._island._reposition(), this);
 
         this._enableMenuBar();
@@ -413,6 +564,7 @@ export default class DynamicIslandExtension extends Extension {
         }
         this._players = null;
 
+        global.display.disconnectObject(this);
         this._disableMenuBar();
         Main.layoutManager.disconnectObject(this);
         this._island.destroy();
@@ -472,9 +624,9 @@ export default class DynamicIslandExtension extends Extension {
             return;
         }
         const sources = [
-            ['camera', qs._camera._indicator, 'camera-web-symbolic', 'Kamera digunakan', 'green'],
-            ['mic', qs._volumeInput._indicator, 'audio-input-microphone-symbolic', 'Mikrofon digunakan', 'orange'],
-            ['record', qs._remoteAccess._indicator, 'media-record-symbolic', 'Layar sedang direkam', 'red'],
+            ['camera', qs._camera._indicator, 'camera-web-symbolic', 'Camera in use', 'green'],
+            ['mic', qs._volumeInput._indicator, 'audio-input-microphone-symbolic', 'Microphone in use', 'orange'],
+            ['record', qs._remoteAccess._indicator, 'media-record-symbolic', 'Screen recording', 'red'],
         ];
         this._privacyIndicators = [];
         for (const [key, indicator, icon, text, tone] of sources) {
@@ -544,7 +696,7 @@ export default class DynamicIslandExtension extends Extension {
         this._notifSettings.connectObject('changed::show-banners', () => {
             const dnd = !this._notifSettings.get_boolean('show-banners');
             this._island.showPill('weather-clear-night-symbolic',
-                dnd ? 'Jangan Ganggu: Aktif' : 'Jangan Ganggu: Mati', dnd ? 'purple' : null);
+                dnd ? 'Do Not Disturb: On' : 'Do Not Disturb: Off', dnd ? 'purple' : null);
         }, this);
 
         this._keymap = Clutter.get_default_backend().get_default_seat().get_keymap();
@@ -554,7 +706,7 @@ export default class DynamicIslandExtension extends Extension {
             if (caps === this._capsLock)
                 return;
             this._capsLock = caps;
-            this._island.showPill('input-keyboard-symbolic', caps ? 'Caps Lock Aktif' : 'Caps Lock Mati');
+            this._island.showPill('input-keyboard-symbolic', caps ? 'Caps Lock On' : 'Caps Lock Off');
         }, this);
     }
 
@@ -591,8 +743,11 @@ export default class DynamicIslandExtension extends Extension {
             return;
 
         const tone = plugged ? 'charging' : pct <= LOW_BATTERY[0] ? 'low' : null;
-        const text = plugged ? `Mengisi · ${Math.round(pct)}%` : `${Math.round(pct)}%`;
-        this._island.showOsd(new Gio.ThemedIcon({name: get('IconName')}), pct, 100,
+        const text = plugged ? `Charging · ${Math.round(pct)}%` : `${Math.round(pct)}%`;
+        // Pick the icon ourselves: UPower's IconName lags behind State right after plugging in
+        const level = Math.round(pct / 10) * 10;
+        const suffix = plugged ? (level === 100 ? '-charged' : '-charging') : '';
+        this._island.showOsd(new Gio.ThemedIcon({name: `battery-level-${level}${suffix}-symbolic`}), pct, 100,
             {text, tone, timeout: BATTERY_TIMEOUT});
     }
 
@@ -613,6 +768,9 @@ export default class DynamicIslandExtension extends Extension {
         if (notification.acknowledged || notification.urgency === MessageTray.Urgency.LOW)
             return;
         if (!notification.source.policy.showBanners && notification.urgency !== MessageTray.Urgency.CRITICAL)
+            return;
+        const fullscreen = global.display.get_monitor_in_fullscreen(Main.layoutManager.primaryIndex);
+        if (fullscreen && !notification.forFeedback && notification.urgency !== MessageTray.Urgency.CRITICAL)
             return;
         this._island.showNotification(notification);
     }
