@@ -18,7 +18,7 @@ import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import {accentFromPixels} from './accent.js';
 
 const MPRIS_PREFIX = 'org.mpris.MediaPlayer2.';
-const EXPANDED_SIZE = [400, 110]; // ponytail: fixed sizes, make them settings if anyone asks
+const EXPANDED_SIZE = [400, 124]; // ponytail: fixed sizes, make them settings if anyone asks
 const NOTIFICATION_SIZE = [400, 76];
 const OSD_SIZE = [300, 36];
 const MAX_COMPACT_WIDTH = 280;
@@ -32,6 +32,7 @@ const BATTERY_TIMEOUT = 3000;
 const PILL_TIMEOUT = 2000;
 const PAUSE_HIDE_TIMEOUT = 30; // seconds paused before the island fades back to idle (hover still opens it)
 const CAMERA_POLL = 5; // seconds
+const PROGRESS_POLL = 1000; // ms; MPRIS never signals Position changes, so it has to be asked for
 // iOS system colours used to tint each kind of activity
 const COLORS = {
     blue: [10, 132, 255],
@@ -68,6 +69,12 @@ function islandStyle([r, g, b], gradient) {
         style += ` background-gradient-direction: vertical; background-gradient-start: rgb(${dark}); background-gradient-end: #000;`;
     }
     return style;
+}
+
+// MPRIS microseconds -> m:ss
+function formatTime(us) {
+    const s = Math.max(0, Math.floor(us / 1e6));
+    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
 
 function view(params = {}) {
@@ -135,7 +142,26 @@ class Island extends St.Widget {
         // Swallow clicks on disabled buttons so they don't fall through and raise the player
         controls.reactive = true;
         controls.connect('button-release-event', () => Clutter.EVENT_STOP);
-        [this._title, this._artist, controls].forEach(a => info.add_child(a));
+        // Track progress: elapsed, bar, remaining; hidden when the player reports no length (e.g. live streams)
+        this._progress = new St.BoxLayout({style_class: 'island-progress', visible: false});
+        this._elapsed = label('island-time');
+        this._remaining = label('island-time island-time-remaining');
+        const progressTrack = new St.Widget({
+            style_class: 'island-level',
+            x_expand: true,
+            y_align: Clutter.ActorAlign.CENTER,
+            layout_manager: new Clutter.BinLayout(),
+        });
+        this._progressFill = new St.Widget({
+            style_class: 'island-level-fill',
+            x_expand: true,
+            y_expand: true,
+            pivot_point: new Graphene.Point({x: 0, y: 0.5}),
+            scale_x: 0,
+        });
+        progressTrack.add_child(this._progressFill);
+        [this._elapsed, progressTrack, this._remaining].forEach(a => this._progress.add_child(a));
+        [this._title, this._artist, this._progress, controls].forEach(a => info.add_child(a));
         this._full.add_child(this._art);
         this._full.add_child(info);
 
@@ -207,6 +233,7 @@ class Island extends St.Widget {
             this._clearSource('_activityId');
             this._clearSource('_pauseId');
             this._clearSource('_waveId');
+            this._clearSource('_progressId');
             this._destroyed = true;
             this._waving = false;
             this._setUnredirectBlocked(false);
@@ -347,6 +374,58 @@ class Island extends St.Widget {
         // Paused bars keep the dim grey from the stylesheet
         const style = this._wavePlaying ? `background-color: rgb(${r},${g},${b});` : null;
         this._wave.get_children().forEach(bar => (bar.style = style));
+        this._progressFill.style = this._accent ? `background-color: rgb(${this._accent.join(',')});` : null;
+    }
+
+    // Polls the player's position only while the expanded view is on screen
+    _syncProgress(run) {
+        if (run === !!this._progressId)
+            return;
+        this._clearSource('_progressId');
+        if (!run)
+            return;
+        const poll = () => {
+            this._pollProgress();
+            return GLib.SOURCE_CONTINUE;
+        };
+        poll();
+        this._progressId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, PROGRESS_POLL, poll);
+    }
+
+    _pollProgress() {
+        const player = this._player;
+        // ponytail: _busName is private, but MprisPlayer exposes neither Position nor the track length
+        Gio.DBus.session.call(player._busName, '/org/mpris/MediaPlayer2', 'org.freedesktop.DBus.Properties', 'GetAll',
+            new GLib.Variant('(s)', ['org.mpris.MediaPlayer2.Player']), new GLib.VariantType('(a{sv})'),
+            Gio.DBusCallFlags.NONE, PROGRESS_POLL, null, (conn, res) => {
+                let props;
+                try {
+                    [props] = conn.call_finish(res).deepUnpack();
+                } catch {
+                    return; // player went away or doesn't answer; leave the bar as it is
+                }
+                if (this._destroyed || player !== this._player)
+                    return;
+                const length = Number(props.Metadata?.deepUnpack()['mpris:length']?.deepUnpack() ?? 0);
+                const position = Number(props.Position?.deepUnpack() ?? 0);
+                this._setProgress(position, length);
+            });
+    }
+
+    _setProgress(position, length) {
+        this._progress.visible = length > 0;
+        if (!this._progress.visible)
+            return;
+        const fraction = Math.clamp(position / length, 0, 1);
+        this._elapsed.text = formatTime(position);
+        this._remaining.text = `-${formatTime(length - position)}`;
+        // Glide across the poll interval while playing; jump on seeks and track changes
+        const glide = this._wavePlaying && Math.abs(fraction - this._progressFill.scale_x) < 0.05;
+        this._progressFill.remove_all_transitions();
+        if (glide)
+            this._progressFill.ease({scale_x: fraction, duration: PROGRESS_POLL, mode: Clutter.AnimationMode.LINEAR});
+        else
+            this._progressFill.scale_x = fraction;
     }
 
     // In fullscreen (presentations, videos) the island stays out of the way and only shows up for activities
@@ -457,6 +536,7 @@ class Island extends St.Widget {
             this._current = next;
         }
         this._syncWave();
+        this._syncProgress(next === this._full && !!this._player);
         // Idle (nothing playing, no privacy dot): blend into the top bar, only show up for activity
         const idle = next === this._compact && (!this._player || this._pausedLong) &&
             !Object.values(this._dots).some(d => d.visible);
@@ -505,7 +585,9 @@ class Island extends St.Widget {
             return;
         this._targetWidth = width;
         this._targetHeight = height;
-        this.ease({width, height, duration: DURATION, mode: Clutter.AnimationMode.EASE_OUT_QUINT});
+        // Spring overshoot when growing, like iPhone; shrinking stays smooth so the slim notch never squashes
+        const mode = width > this.width ? Clutter.AnimationMode.EASE_OUT_BACK : Clutter.AnimationMode.EASE_OUT_QUINT;
+        this.ease({width, height, duration: DURATION, mode});
     }
 
     _reposition() {

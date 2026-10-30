@@ -21,7 +21,12 @@
 .dynamic-island .island-art { border-radius: 12px; }
 .dynamic-island .island-title { font-weight: bold; font-size: 11pt; }
 .dynamic-island .island-artist { color: #aaa; font-size: 9.5pt; }
-.dynamic-island .island-controls { spacing: 18px; padding-top: 6px; }
+.dynamic-island .island-controls { spacing: 18px; padding-top: 2px; }
+.dynamic-island .island-progress { spacing: 8px; padding-top: 6px; }
+.dynamic-island .island-progress .island-level { height: 4px; border-radius: 2px; }
+.dynamic-island .island-progress .island-level-fill { border-radius: 2px; }
+.dynamic-island .island-time { color: #aaa; font-size: 8pt; font-feature-settings: "tnum"; min-width: 32px; }
+.dynamic-island .island-time-remaining { text-align: right; }
 .dynamic-island .island-osd { spacing: 12px; }
 .dynamic-island .island-level { height: 6px; border-radius: 3px; background-color: rgba(255,255,255,0.2); }
 .dynamic-island .island-level-fill { border-radius: 3px; background-color: #fff; }
