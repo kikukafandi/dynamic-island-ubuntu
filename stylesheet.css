@@ -7,12 +7,16 @@
   padding: 0 14px;
   transition-duration: 450ms;
 }
+.dynamic-island.idle {
+  background-color: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
 .dynamic-island.expanded {
   border-radius: 28px;
   padding: 14px;
 }
 .dynamic-island .island-compact { spacing: 8px; font-weight: bold; }
-.dynamic-island .island-compact-clock { color: #aaa; padding-left: 4px; }
 .dynamic-island .island-expanded { spacing: 14px; }
 .dynamic-island .island-art { border-radius: 12px; }
 .dynamic-island .island-title { font-weight: bold; font-size: 11pt; }
@@ -24,11 +28,25 @@
 .dynamic-island .island-level-fill.charging { background-color: #34c759; }
 .dynamic-island .island-level-fill.low { background-color: #ff3b30; }
 .dynamic-island .island-osd-label { font-weight: bold; font-size: 9.5pt; min-width: 36px; text-align: right; }
+.dynamic-island .island-wave { spacing: 2px; padding-left: 2px; }
+.dynamic-island .island-wave-bar { width: 3px; height: 14px; border-radius: 2px; background-color: #34c759; }
+.dynamic-island .island-dot { width: 7px; height: 7px; border-radius: 4px; }
+.dynamic-island .island-dot.green { background-color: #34c759; }
+.dynamic-island .island-dot.orange { background-color: #ff9500; }
+.dynamic-island .island-dot.red { background-color: #ff3b30; }
+.dynamic-island .island-pill-icon.green { color: #34c759; }
+.dynamic-island .island-pill-icon.orange { color: #ff9500; }
+.dynamic-island .island-pill-icon.red { color: #ff3b30; }
+.dynamic-island .island-pill-icon.purple { color: #af52de; }
+.dynamic-island .island-pill { spacing: 8px; }
+.dynamic-island .island-pill-label { font-weight: bold; font-size: 9.5pt; }
 .dynamic-island .island-button { color: #fff; border-radius: 99px; padding: 4px; }
 .dynamic-island .island-button:hover { background-color: rgba(255,255,255,0.15); }
 .dynamic-island .island-button:insensitive { color: rgba(255,255,255,0.3); }
 
-/* Transparent top bar so the island floats on its own */
+/* MacBook-style menu bar: transparent (pair with blur-my-shell for the frosted look) */
 #panel, #panel.solid, #panel:overview {
   background-color: transparent;
 }
+
+#panel .island-app-name { font-weight: bold; }

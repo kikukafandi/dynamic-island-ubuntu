@@ -2,11 +2,14 @@
 
 An iPhone-style dynamic island in the GNOME top bar.
 
-- **Clock** when idle (click opens the calendar)
-- **Now playing** media (MPRIS): cover + title; hover to expand with ⏮ ⏯ ⏭
+- **Invisible when idle**: blends into the top bar, appears only for activity (hover shows the time, click opens the calendar)
+- **Now playing** media (MPRIS): cover + title + animated waveform; hover to expand with ⏮ ⏯ ⏭
 - **Notifications** pop into the island (replaces stock banners)
 - **Volume / brightness** level shown in the island (replaces stock OSD)
 - **Battery**: pops up when the charger is plugged/unplugged and when it drops to 20% / 10%
+- **Privacy dots**: green camera, orange microphone, red screen recording
+- **Do Not Disturb** and **Caps Lock** changes pop a short pill
+- **MacBook-style menu bar**: bold focused-app name on the left, Activities hidden, clock on the far right
 
 Supports GNOME Shell 46 (Ubuntu 24.04).
 
@@ -23,4 +26,8 @@ Restart GNOME Shell (X11: `Alt+F2`, `r`, Enter; Wayland: log out and back in), t
 gnome-extensions enable dynamic-island@kikuk
 ```
 
-Note: the extension also makes the top bar transparent (see `stylesheet.css`).
+Note: the extension makes the top bar transparent (see `stylesheet.css`); pair it with blur-my-shell's panel blur for the frosted macOS look.
+
+## License
+
+MIT, see [LICENSE](LICENSE).

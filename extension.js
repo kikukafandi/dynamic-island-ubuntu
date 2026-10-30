@@ -4,24 +4,30 @@ import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
 import Graphene from 'gi://Graphene';
 import Pango from 'gi://Pango';
+import Shell from 'gi://Shell';
 import St from 'gi://St';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as MessageTray from 'resource:///org/gnome/shell/ui/messageTray.js';
 import {MprisPlayer} from 'resource:///org/gnome/shell/ui/mpris.js';
+import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
 const MPRIS_PREFIX = 'org.mpris.MediaPlayer2.';
 const EXPANDED_SIZE = [400, 110]; // ponytail: fixed sizes, make them settings if anyone asks
 const NOTIFICATION_SIZE = [400, 76];
 const OSD_SIZE = [300, 36];
-const MAX_COMPACT_WIDTH = 360;
+const MAX_COMPACT_WIDTH = 280;
+const NOTCH_WIDTH = 180; // idle island is an empty MacBook-style notch; the clock lives on the right
 const DURATION = 450;
 const FADE = 180;
 const COLLAPSE_DELAY = 200; // ms of grace so brushing the edge doesn't flicker
 const NOTIFICATION_TIMEOUT = 4000;
 const OSD_TIMEOUT = 1500;
 const BATTERY_TIMEOUT = 3000;
+const PILL_TIMEOUT = 2000;
+const WAVE_STEP = 180; // ms between waveform bar moves
+const CAMERA_POLL = 3; // seconds
 const LOW_BATTERY = [20, 10]; // warn once when dropping past each of these percentages
 const UPOWER_BATTERY = 2;
 const PLUGGED_STATES = [1, 4, 5]; // charging, fully charged, pending charge
@@ -70,12 +76,26 @@ class Island extends St.Widget {
         });
         this._compactIcon = new St.Icon({icon_size: 16, visible: false});
         this._compactLabel = label('');
-        // Clock stays visible next to the track title while media plays (panel clock is hidden under the island)
-        this._compactClock = new St.Label({style_class: 'island-compact-clock', y_align: Clutter.ActorAlign.CENTER, visible: false});
-        this._compactClock.clutter_text.ellipsize = Pango.EllipsizeMode.NONE; // the title shrinks, never the clock
         this._compact.add_child(this._compactIcon);
         this._compact.add_child(this._compactLabel);
-        this._compact.add_child(this._compactClock);
+
+        // Music waveform, animated while a player is Playing
+        this._wave = new St.BoxLayout({style_class: 'island-wave', visible: false, y_align: Clutter.ActorAlign.CENTER});
+        for (let i = 0; i < 4; i++) {
+            this._wave.add_child(new St.Widget({
+                style_class: 'island-wave-bar',
+                pivot_point: new Graphene.Point({x: 0.5, y: 0.5}),
+                scale_y: 0.4,
+            }));
+        }
+        this._compact.add_child(this._wave);
+
+        // Privacy dots, iPhone colours: camera green, mic orange, screen recording red
+        this._dots = {};
+        for (const [key, tone] of [['camera', 'green'], ['mic', 'orange'], ['record', 'red']]) {
+            this._dots[key] = new St.Widget({style_class: `island-dot ${tone}`, visible: false, y_align: Clutter.ActorAlign.CENTER});
+            this._compact.add_child(this._dots[key]);
+        }
         this._current = this._compact;
 
         // Expanded on hover: cover art, title/artist, controls
@@ -129,15 +149,20 @@ class Island extends St.Widget {
         this._osd.add_child(track);
         this._osd.add_child(this._osdLabel);
 
-        [this._compact, this._full, this._notif, this._osd].forEach(v => this.add_child(v));
+        // Pill: short status message (Do Not Disturb, Caps Lock, privacy)
+        this._pill = view({style_class: 'island-pill', x_expand: false, x_align: Clutter.ActorAlign.CENTER});
+        this._pillIcon = new St.Icon({icon_size: 16, y_align: Clutter.ActorAlign.CENTER});
+        this._pillLabel = label('island-pill-label');
+        this._pill.add_child(this._pillIcon);
+        this._pill.add_child(this._pillLabel);
 
-        // Mirror the panel clock instead of running our own
+        [this._compact, this._full, this._notif, this._osd, this._pill].forEach(v => this.add_child(v));
+
+        // Hover on the idle notch shows the time; mirror the panel clock instead of running our own
         this._clock = Main.panel.statusArea.dateMenu._clockDisplay;
         this._clock.connectObject('notify::text', () => {
-            this._compactClock.text = this._clock.text;
             if (!this._player)
-                this._compactLabel.text = this._artist.text = this._clock.text;
-            this._update();
+                this._artist.text = this._clock.text;
         }, this);
 
         this.connect('notify::hover', () => {
@@ -157,6 +182,7 @@ class Island extends St.Widget {
         this.connect('destroy', () => {
             this._clearSource('_collapseId');
             this._clearSource('_activityId');
+            this._clearSource('_waveId');
         });
         this.connect('notify::width', () => this._reposition());
         this.connect('button-release-event', () => {
@@ -174,8 +200,8 @@ class Island extends St.Widget {
         this._player = player;
         if (!player) {
             this._compactIcon.hide();
-            this._compactClock.hide();
-            this._compactLabel.text = this._clock.text;
+            this._compactLabel.text = '';
+            this._setWave(false);
             this._art.gicon = new Gio.ThemedIcon({name: 'audio-x-generic-symbolic'});
             this._title.text = 'Tidak ada media';
             this._artist.text = this._clock.text;
@@ -189,13 +215,12 @@ class Island extends St.Widget {
             : player.app?.get_icon() ?? new Gio.ThemedIcon({name: 'audio-x-generic-symbolic'});
         this._compactIcon.gicon = gicon;
         this._compactIcon.show();
-        this._compactClock.text = this._clock.text;
-        this._compactClock.show();
         this._controls.show();
         this._compactLabel.text = player.trackTitle;
         this._art.gicon = gicon;
         this._title.text = player.trackTitle;
         this._artist.text = player.trackArtists.join(', ');
+        this._setWave(player.status === 'Playing');
         this._play.child.icon_name = player.status === 'Playing'
             ? 'media-playback-pause-symbolic'
             : 'media-playback-start-symbolic';
@@ -227,6 +252,37 @@ class Island extends St.Widget {
         this._showActivity(this._osd, OSD_SIZE, timeout, null);
     }
 
+    showPill(iconName, text, tone = null) {
+        this._pillIcon.icon_name = iconName;
+        this._pillIcon.style_class = tone ? `island-pill-icon ${tone}` : 'island-pill-icon';
+        this._pillLabel.text = text;
+        this._showActivity(this._pill, [this._fitWidth(this._pill), Main.panel.height - 6], PILL_TIMEOUT, null);
+    }
+
+    setPrivacy(key, active) {
+        this._dots[key].visible = active;
+        this._update();
+    }
+
+    _setWave(playing) {
+        this._wave.visible = playing;
+        if (playing === !!this._waveId)
+            return;
+        this._clearSource('_waveId');
+        if (!playing)
+            return;
+        this._waveId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, WAVE_STEP, () => {
+            for (const bar of this._wave.get_children()) {
+                bar.ease({
+                    scale_y: 0.3 + Math.random() * 0.7,
+                    duration: WAVE_STEP,
+                    mode: Clutter.AnimationMode.EASE_IN_OUT_SINE,
+                });
+            }
+            return GLib.SOURCE_CONTINUE;
+        });
+    }
+
     _showActivity(activityView, size, timeout, onClick) {
         this._clearSource('_activityId');
         this._activity = {view: activityView, size, onClick};
@@ -251,11 +307,17 @@ class Island extends St.Widget {
     }
 
     _compactSize() {
-        const [, natW] = this._compact.get_preferred_width(-1);
+        const width = this._player ? this._fitWidth(this._compact) : NOTCH_WIDTH;
+        return [width, Main.panel.height - 6];
+    }
+
+    // Island width that fits a view's natural width plus the island's own padding and border
+    _fitWidth(actor) {
+        const [, natW] = actor.get_preferred_width(-1);
         const node = this.get_theme_node();
         const chrome = node.get_horizontal_padding() +
             node.get_border_width(St.Side.LEFT) + node.get_border_width(St.Side.RIGHT);
-        return [Math.min(natW + chrome, MAX_COMPACT_WIDTH), Main.panel.height - 6];
+        return Math.min(natW + chrome, MAX_COMPACT_WIDTH);
     }
 
     // Single place that decides what the island shows: activity > hover > compact
@@ -271,7 +333,13 @@ class Island extends St.Widget {
             this._crossfade(this._current, next);
             this._current = next;
         }
-        if (next === this._compact || next === this._osd) // OSD is a slim pill, keep compact padding
+        // Idle (nothing playing, no privacy dot): blend into the top bar, only show up for activity
+        const idle = next === this._compact && !this._player && !Object.values(this._dots).some(d => d.visible);
+        if (idle)
+            this.add_style_class_name('idle');
+        else
+            this.remove_style_class_name('idle');
+        if ([this._compact, this._osd, this._pill].includes(next)) // slim pills keep compact padding
             this.remove_style_class_name('expanded');
         else
             this.add_style_class_name('expanded');
@@ -305,16 +373,25 @@ export default class DynamicIslandExtension extends Extension {
         this._island.setPlayer(null);
         Main.layoutManager.connectObject('monitors-changed', () => this._island._reposition(), this);
 
-        // The island sits on top of the clock; keep the clock allocated so the calendar menu still anchors to it
-        Main.panel.statusArea.dateMenu.opacity = 0;
-
+        this._enableMenuBar();
         this._enableMedia();
         this._enableNotifications();
         this._enableOsd();
         this._enableBattery();
+        this._enablePrivacy();
+        this._enableToggles();
     }
 
     disable() {
+        this._notifSettings.disconnectObject(this);
+        this._notifSettings = null;
+        this._keymap.disconnectObject(this);
+        this._privacyIndicators?.forEach(i => i.disconnectObject(this));
+        Main.screenshotUI.disconnectObject(this);
+        if (this._cameraPollId)
+            GLib.Source.remove(this._cameraPollId);
+        this._cameraPollId = null;
+
         this._batteryCancellable.cancel();
         this._battery?.disconnectObject(this);
         this._battery = null;
@@ -334,10 +411,44 @@ export default class DynamicIslandExtension extends Extension {
         }
         this._players = null;
 
+        this._disableMenuBar();
         Main.layoutManager.disconnectObject(this);
-        Main.panel.statusArea.dateMenu.opacity = 255;
         this._island.destroy();
         this._island = null;
+    }
+
+    // MacBook-style menu bar: bold focused-app name on the left, no Activities pill, clock on the far right
+    _enableMenuBar() {
+        const dateMenu = Main.panel.statusArea.dateMenu.container;
+        this._dateMenuIndex = Main.panel._centerBox.get_children().indexOf(dateMenu);
+        Main.panel._centerBox.remove_child(dateMenu);
+        Main.panel._rightBox.add_child(dateMenu);
+
+        Main.panel.statusArea.activities.container.hide();
+
+        this._appName = new PanelMenu.Button(0.0, 'Focused app', true);
+        const appLabel = new St.Label({style_class: 'island-app-name', y_align: Clutter.ActorAlign.CENTER});
+        this._appName.add_child(appLabel);
+        Main.panel.addToStatusArea('dynamic-island-app-name', this._appName, 1, 'left');
+        const sync = () => {
+            const app = Shell.WindowTracker.get_default().focus_app;
+            appLabel.text = app?.get_name() ?? '';
+            this._appName.visible = !!app;
+        };
+        Shell.WindowTracker.get_default().connectObject('notify::focus-app', sync, this);
+        sync();
+    }
+
+    _disableMenuBar() {
+        Shell.WindowTracker.get_default().disconnectObject(this);
+        this._appName.destroy();
+        this._appName = null;
+
+        Main.panel.statusArea.activities.container.show();
+
+        const dateMenu = Main.panel.statusArea.dateMenu.container;
+        Main.panel._rightBox.remove_child(dateMenu);
+        Main.panel._centerBox.insert_child_at_index(dateMenu, Math.max(this._dateMenuIndex, 0));
     }
 
     _enableOsd() {
@@ -348,6 +459,101 @@ export default class DynamicIslandExtension extends Extension {
                 return this._origOsdShow.call(Main.osdWindowManager, monitorIndex, icon, label, level, maxLevel);
             this._island.showOsd(icon, level, maxLevel ?? 1);
         };
+    }
+
+    // Camera / mic / screen recording: mirror the stock privacy indicators as dots, and announce when one turns on
+    _enablePrivacy() {
+        const qs = Main.panel.statusArea.quickSettings;
+        if (!qs._remoteAccess) {
+            // Quick settings build their indicators asynchronously at login
+            Main.layoutManager.connectObject('startup-complete', () => this._enablePrivacy(), this);
+            return;
+        }
+        const sources = [
+            ['camera', qs._camera._indicator, 'camera-web-symbolic', 'Kamera digunakan', 'green'],
+            ['mic', qs._volumeInput._indicator, 'audio-input-microphone-symbolic', 'Mikrofon digunakan', 'orange'],
+            ['record', qs._remoteAccess._indicator, 'media-record-symbolic', 'Layar sedang direkam', 'red'],
+        ];
+        this._privacyIndicators = [];
+        for (const [key, indicator, icon, text, tone] of sources) {
+            if (!indicator) // _remoteAccess has no indicator without a remote access controller
+                continue;
+            const isActive = () => indicator.visible ||
+                (key === 'camera' && this._v4l2Camera) ||
+                (key === 'record' && Main.screenshotUI.screencast_in_progress);
+            const sync = announce => {
+                const active = isActive();
+                this._island.setPrivacy(key, active);
+                if (announce && active)
+                    this._island.showPill(icon, text, tone);
+            };
+            indicator.connectObject('notify::visible', () => sync(true), this);
+            if (key === 'record')
+                Main.screenshotUI.connectObject('notify::screencast-in-progress', () => sync(true), this);
+            if (key === 'camera')
+                this._pollV4l2Camera(() => sync(true));
+            this._privacyIndicators.push(indicator);
+            sync(false);
+        }
+    }
+
+    // Chromium/Brave and others open /dev/video* directly instead of via PipeWire, so the stock camera
+    // indicator never sees them. ponytail: polls `fuser` every CAMERA_POLL s; drop if GNOME ever tracks V4L2.
+    _pollV4l2Camera(onChange) {
+        const devices = [];
+        const dir = Gio.File.new_for_path('/dev').enumerate_children('standard::name', Gio.FileQueryInfoFlags.NONE, null);
+        for (let info; (info = dir.next_file(null));) {
+            if (info.get_name().startsWith('video'))
+                devices.push(`/dev/${info.get_name()}`);
+        }
+        if (!devices.length)
+            return;
+
+        this._v4l2Camera = false;
+        this._cameraPollId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, CAMERA_POLL, () => {
+            let proc;
+            try {
+                proc = Gio.Subprocess.new(['fuser', ...devices],
+                    Gio.SubprocessFlags.STDOUT_SILENCE | Gio.SubprocessFlags.STDERR_SILENCE);
+            } catch (e) {
+                logError(e, 'dynamic-island: fuser unavailable, V4L2 camera detection off');
+                this._cameraPollId = null;
+                return GLib.SOURCE_REMOVE;
+            }
+            proc.wait_check_async(null, (p, res) => {
+                let inUse;
+                try {
+                    inUse = p.wait_check_finish(res); // exit 0 = some process holds a device open
+                } catch {
+                    inUse = false;
+                }
+                if (!this._island || inUse === this._v4l2Camera)
+                    return;
+                this._v4l2Camera = inUse;
+                onChange();
+            });
+            return GLib.SOURCE_CONTINUE;
+        });
+    }
+
+    // Do Not Disturb and Caps Lock changes pop a short pill
+    _enableToggles() {
+        this._notifSettings = new Gio.Settings({schema_id: 'org.gnome.desktop.notifications'});
+        this._notifSettings.connectObject('changed::show-banners', () => {
+            const dnd = !this._notifSettings.get_boolean('show-banners');
+            this._island.showPill('weather-clear-night-symbolic',
+                dnd ? 'Jangan Ganggu: Aktif' : 'Jangan Ganggu: Mati', dnd ? 'purple' : null);
+        }, this);
+
+        this._keymap = Clutter.get_default_backend().get_default_seat().get_keymap();
+        this._capsLock = this._keymap.get_caps_lock_state();
+        this._keymap.connectObject('state-changed', () => {
+            const caps = this._keymap.get_caps_lock_state();
+            if (caps === this._capsLock)
+                return;
+            this._capsLock = caps;
+            this._island.showPill('input-keyboard-symbolic', caps ? 'Caps Lock Aktif' : 'Caps Lock Mati');
+        }, this);
     }
 
     _enableBattery() {
